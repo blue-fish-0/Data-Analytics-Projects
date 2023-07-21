@@ -6,5 +6,5 @@ In this project, I trained and evaluated regression models to predict house pric
 
 **Skills demonstrated**: Regression, cross-validation, ...
 
-## 2. House Prices Prediction
+## 2. 
 
