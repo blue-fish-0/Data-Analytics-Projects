@@ -5,5 +5,3 @@ I trained and evaluated regression models to predict house prices.
 
 **Skills demonstrated**: data processing pipelines, exploratory data analysis, regression, regularization, cross-validation. 
 
-## 2. 
-
