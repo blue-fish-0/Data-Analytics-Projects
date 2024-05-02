@@ -1,0 +1,667 @@
+---
+title: "Advanced Data Analysis Final Project"
+output:
+  pdf_document: default
+---
+
+```{r}
+suppressMessages(library(tidyverse))
+data = read.csv("mushrooms.csv")
+dim(data)
+```
+
+# **1 Data Preparation**
+
+**Rename variables**
+
+```{r}
+new_name_to_old_name = c(edible = "class", bruises = "bruises",
+                         gill_size = "gill.size",stalk_shape = "stalk.shape",
+                         cap_surface = "cap.surface", 
+                         gill_attach = "gill.attachment", 
+                         veil_color = "veil.color",habitat = "habitat",
+                         gill_spacing = "gill.spacing",num_rings = "ring.number")
+data = rename(data, all_of(new_name_to_old_name))
+
+# Remove the unused predictors
+data = data[,names(new_name_to_old_name)]
+```
+
+**Convert categorical variables to factors**
+
+```{r}
+for (predictor in names(new_name_to_old_name)) {
+  data[,predictor] = as.factor(data[,predictor])
+}
+
+# Rename levels of variables
+data = data %>%
+     mutate(edible = recode(edible, "e"="edible", "p"="poisonous"),
+            bruises = recode(bruises, "t"="yes", "f"="no"),
+            gill_size = recode(gill_size, "b"="broad", "n"="narrow"),
+            stalk_shape = recode(stalk_shape, "e"="enlarging", "t"="tapering"),
+            cap_surface = recode(cap_surface, "f"="fibrous","g"="grooves","y"="scaly","s"="smooth"),
+            gill_attach = recode(gill_attach,"a"="attached","d"="descending",
+"f"="free","n"="notched"),
+            veil_color = recode(veil_color,"n"="brown","o"="orange","w"="white","y"="yellow"),
+            habitat = recode(habitat,"g"="grasses","l"="leaves","m"="meadows",
+"p"="paths","u"="urban","w"="waste","d"="woods"),
+            gill_spacing = recode(gill_spacing,"c"="close","w"="crowded","d"="distant"),
+            num_rings = recode(num_rings,"n"=0,"o"=1,"t"=2),
+            )
+```
+
+**Specify order of ordinal variables**
+
+```{r}
+data$gill_spacing = ordered(data$gill_spacing, 
+                            levels=c("crowded", "close", "distant"))
+data$num_rings = ordered(data$num_rings, 
+                         levels=c(0, 1, 2))
+```
+
+**Decrease dataset size\
+**We decreased the number of observations to speed up training.
+
+```{r}
+set.seed(0)
+
+data_edible = data %>%
+             filter(edible == "edible")
+data_poisonous = data %>%
+             filter(edible == "poisonous")
+
+data = rbind(sample_n(data_edible, 500),
+             sample_n(data_poisonous, 500))
+
+dim(data)
+```
+
+**Checking for NA values**
+
+```{r}
+sum(is.na(data))
+```
+
+There are no NA (not available) values.
+
+# **2 Exploratory data analysis**
+
+**Target Variable Distribution**
+
+```{r}
+data %>% 
+  group_by(edible) %>%
+  summarise(proportion = length(edible)/nrow(data))
+```
+
+**Categorical Predictor Distributions**
+
+```{r fig.height=6}
+suppressMessages(library(gridExtra))
+plot_bar = function(predictor) {
+  return(ggplot(data, aes(x=!!rlang::enexpr(predictor), fill=edible))+
+  geom_bar(position="fill") +
+  coord_flip() +
+  ylab("Proportion")
+  )
+}
+
+p2 = plot_bar(bruises); p3 = plot_bar(gill_size); p4 = plot_bar(stalk_shape); 
+p5 = plot_bar(cap_surface); p6 = plot_bar(gill_attach); p7 = plot_bar(veil_color);
+p8 = plot_bar(habitat); p9 = plot_bar(gill_spacing); p10 = plot_bar(num_rings)
+
+grid.arrange(p2, p3, p4, p5, p6, p7, p8, p9, p10, ncol=2)
+```
+
+```{r}
+# Calculate exact edibility proportions for gill_size categories
+data %>%
+  group_by(gill_size, edible) %>%
+  summarise(n = n(), .groups="keep")
+```
+
+**Clustering**
+
+Count the number of distinct observations (rows).
+
+```{r}
+nrow(count(data, pick(everything())))
+```
+
+```{r fig.height=4}
+suppressMessages(library(cluster))
+
+unique_data = count(data, pick(everything()))
+unique_data$n = NULL
+unique_data$edible = NULL
+
+# Use gower metric for categorical data
+dissimilarity_matrix = daisy(unique_data, metric = c("gower"))
+
+# Partition Around Medoids (PAM) clustering
+
+# Initialize vector to store average silhouette width for each cluster size
+sil_width <- c(NA) 
+max_clusters = 30 
+for(num_clusters in 2:max_clusters){
+  
+  pam_fit <- pam(dissimilarity_matrix,
+                 diss = TRUE,
+                 k = num_clusters)
+  
+  sil_width[num_clusters] <- pam_fit$silinfo$avg.width
+}
+
+cat("The best no. of clusters is", which.max(sil_width))
+
+# Plot average sihouette width for each number of clusters
+plot(1:max_clusters, sil_width,
+     xlab = "Number of clusters",
+     ylab = "Average Silhouette Width", 
+     col=ifelse(1:max_clusters==which.max(sil_width), "red", "black"), 
+     pch=19)
+lines(1:max_clusters, sil_width)
+```
+
+```{r fig.height=4}
+# Refit using the best no. of clusters
+pam_fit <- pam(dissimilarity_matrix, diss = TRUE, k=which.max(sil_width))
+unique_data = count(data, pick(everything()))
+
+# Calculate the number of mushrooms and the percentage of poisonous 
+# mushrooms within each cluster
+pam_results <- unique_data %>%
+  dplyr::select(edible, n) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster, edible) %>% 
+  summarise(n = sum(n), .groups="keep") %>%
+  pivot_wider(names_from = edible, values_from = n, values_fill=0) %>%
+  mutate(percent_poisonous = poisonous/(poisonous+edible)) %>% 
+  mutate(cluster_size = edible+poisonous)
+
+# Label each cluster with the number of mushrooms in the cluster
+ggplot(data=pam_results, aes(x=reorder(cluster, +percent_poisonous),
+                             y=percent_poisonous, label=cluster_size)) +
+       geom_bar(stat="identity") + 
+       geom_text(nudge_y=0.05) +
+       xlab("Cluster")
+```
+
+**Dimensionality Reduction**
+
+```{r fig.height=4}
+suppressMessages(library(FactoMineR))
+suppressMessages(library(factoextra))
+X = data
+X$edible <- NULL
+
+# Multiple correspondence analysis dimensionality reduction
+# ncp is the no. of dimensions
+mca_results = MCA(X, ncp=2, graph = FALSE)
+fviz_mca_ind(mca_results, geom="point", habillage=data$edible)
+```
+
+# 3 Statistical Models
+
+**Train-test split\
+**Split the dataset into an 80% training set and 20% test set.
+
+```{r}
+num_observations = dim(data)[1]
+
+set.seed(0)
+train_index = sample(1:num_observations, num_observations)
+num_train = num_observations * 0.8
+train_set = data[train_index[1:num_train], ]
+test_set = data[train_index[(num_train+1):num_observations], ]
+c(nrow(train_set), nrow(test_set))
+
+# Split training set into predictors and target
+x_train = train_set
+x_train$edible <- NULL
+y_train = train_set$edible
+
+x_test = test_set
+x_test$edible <- NULL
+y_test = test_set$edible
+```
+
+**Hyperparameter tuning\
+**To tune the hyperparameter values, we used 5-fold cross-validation and the F-score.
+
+```{r}
+suppressMessages(library(caret))
+
+# Function to calculate the F-score
+f1 <- function(data, lev = NULL, model = NULL) {
+  precision <- posPredValue(data$pred, data$obs, positive = "poisonous")
+  sens <- sensitivity(data$pred, data$obs, positive = "poisonous")
+  f1_val <- (2*precision*sens) / (precision + sens)
+  names(f1_val) <- c("F1")
+  return(f1_val)
+}
+
+train_control <- trainControl(method = "cv", number=5, summaryFunction=f1)
+```
+
+**Calculate best probability threshold\
+**We will use the function below to calculate the best probability threshold for each model.
+
+```{r}
+suppressMessages(library(pROC))
+
+# Calculate the F-score for each probability threshold
+threshold_f_scores = function(pred_prob) {
+  # Calculate ROC object 
+  roc_obj = roc(response=y_test, predictor=pred_prob, 
+                levels=c("edible", "poisonous"), 
+                direction=c("<"))
+  thresholds = seq(0, 1, length.out=20)
+  
+  # Initialize vector to store F-score for each threshold
+  f_scores = vector(length=length(thresholds))
+  for (threshold in seq_along(thresholds)) {
+    precision = coords(roc_obj, thresholds[threshold], ret=c("precision"))[[1]]
+    recall = coords(roc_obj, thresholds[threshold], ret=c("recall"))[[1]]
+    f_score = 2 / (1/precision + 1/recall) 
+    f_scores[threshold] = f_score
+  }
+    
+  threshold_f_scores = data.frame(threshold = thresholds, 
+                                   f_score = f_scores)
+  return(threshold_f_scores)
+}
+```
+
+**Logistic Regression\
+**Caret uses a probability threshold of 0.5\
+alpha = 0 means ridge.
+
+```{r}
+set.seed(0)
+
+# alpha is the balance between ridge and lasso
+# lambda is the amount of regularization
+hyperparam_grid <- expand.grid(
+  alpha = seq(0, 1, length.out=20), 
+  lambda = seq(0, 0.5, length = 20)
+)
+
+logistic_model = train(edible ~ .,
+           method     = "glmnet",
+           tuneGrid   = hyperparam_grid,
+           trControl  = train_control,
+           metric     = "F1",
+           data       = train_set)
+
+logistic_pred_prob = predict(logistic_model, newdata = x_test, type="prob")[,"poisonous"]
+  
+logistic_f_scores = threshold_f_scores(logistic_pred_prob)
+logistic_best_f_score = max(logistic_f_scores$f_score, na.rm=T)
+```
+
+```{r fig.width=3, fig.height=2}
+# Get hyperparameters of best model
+best_alpha = logistic_model$finalModel$tuneValue$alpha
+best_lambda = logistic_model$finalModel$tuneValue$lambda
+
+cat("The best model has alpha =", round(best_alpha, 2), "and lambda=", round(best_lambda, 2))
+# Validation heatmap
+logistic_grid = logistic_model$results
+ggplot(logistic_grid, aes(alpha, lambda, fill= F1)) + 
+  geom_tile() 
+```
+
+```{r fig.width=3, fig.height=2}
+# Plot the f-scores for each probability threshold
+best_threshold = logistic_f_scores$threshold[which.max(logistic_f_scores$f_score)]
+
+cat("The best threshold is", round(best_threshold, 2))
+
+ggplot(data=logistic_f_scores, aes(x=threshold, y=f_score)) +
+  geom_line()+
+  geom_point()+
+  ylab("Test set F-score")
+```
+
+**Random Forest**
+
+```{r}
+set.seed(0)
+
+# mtry is the number of predictors to consider in each split
+num_predictors = ncol(x_train)
+hyperparam_grid <-  expand.grid(
+  mtry = 1:num_predictors 
+)
+
+random_f_model = train(edible ~ .,
+                    method     = "rf",
+                    tuneGrid   = hyperparam_grid,
+                    trControl  = train_control,
+                    metric     = "F1",
+                    data       = train_set)
+
+random_f_pred_prob = predict(random_f_model, newdata = x_test, type="prob")[,"poisonous"]
+  
+random_f_f_scores = threshold_f_scores(random_f_pred_prob)
+random_f_best_f_score = max(random_f_f_scores$f_score, na.rm=T)
+```
+
+```{r fig.width=3, fig.height=2}
+# Get hyperparameter of best model
+best_mtry = random_f_model$finalModel$tuneValue$mtry
+
+ggplot(random_f_model$results, aes(x=mtry, y=F1)) + 
+    geom_errorbar(aes(ymin=F1-F1SD, ymax=F1+F1SD), width=.1) +
+    geom_line() +
+    geom_point() + 
+    ylab("Validation set F-score (± SD)") + 
+    scale_x_continuous(breaks=seq(1,num_predictors)) + 
+    ggtitle(paste("The best model has mtry =", best_mtry))
+```
+
+Refit with best mtry value to get predictor importances later.
+
+```{r}
+suppressMessages(library(randomForest))
+random_f_model = randomForest(edible ~ .,data=train_set, mtry=best_mtry, importance=TRUE)
+
+random_f_y_test_pred = predict(random_f_model, newdata = x_test)
+```
+
+**Boosting**
+
+```{r, warning=FALSE}
+set.seed(0)
+
+# n.trees is the no. of trees 
+# interaction.depth is the size of each tree
+# shrinkage is the learning rate
+# n.minobsinnode is the min. no. of observations in a terminal node
+hyperparam_grid <- expand.grid(
+  n.trees = ceiling(seq(100, 500, length.out=10)),
+  interaction.depth = c(4, 7, 10), 
+  shrinkage = seq(0.01, 0.1, length.out=5),
+  n.minobsinnode = 1
+)
+
+boost_model = train(edible ~ .,
+                    method     = "gbm",
+                    tuneGrid   = hyperparam_grid,
+                    trControl  = train_control,
+                    metric     = "F1",
+                    data       = train_set,
+                    verbose    = FALSE)
+
+boost_pred_prob = predict(boost_model, newdata = x_test, type="prob")[,"poisonous"]
+  
+boost_f_scores = threshold_f_scores(boost_pred_prob)
+boost_best_f_score = max(boost_f_scores$f_score, na.rm=T)
+```
+
+```{r fig.height=4}
+best_n.trees = boost_model$finalModel$tuneValue$n.trees
+best_interaction.depth = boost_model$finalModel$tuneValue$interaction.depth
+best_shrinkage = boost_model$finalModel$tuneValue$shrinkage
+
+cat("The best model has num_trees =", round(best_n.trees, 2), 
+    ", interaction depth =", round(best_interaction.depth, 2), 
+    "and shrinkage =", round(best_shrinkage, 2))
+plot(boost_model)
+```
+
+**k-NN**
+
+```{r}
+set.seed(0)
+
+# k is the no. of neighbors
+k_max = 10
+hyperparam_grid <- expand.grid(
+  k = 1:k_max
+)
+
+knn_model <- train(edible ~ .,
+           method     = "knn",
+           tuneGrid   = hyperparam_grid,
+           trControl  = train_control,
+           metric     = "F1",
+           data       = train_set, 
+           )
+
+knn_pred_prob = predict(knn_model, newdata = x_test, type="prob")[,"poisonous"]
+  
+knn_f_scores = threshold_f_scores(knn_pred_prob)
+knn_best_f_score = max(knn_f_scores$f_score, na.rm=T)
+```
+
+```{r fig.height=3}
+best_k = knn_model$finalModel$tuneValue$k
+
+ggplot(knn_model$results, aes(x=k, y=F1)) + 
+    geom_errorbar(aes(ymin=F1-F1SD, ymax=F1+F1SD), width=.1) +
+    geom_line() +
+    geom_point() + 
+    ylab("Validation set F-score (± SD)") + 
+    scale_x_continuous(breaks=seq(1,k_max))
+```
+
+**Neural network**
+
+```{r}
+set.seed(0)
+
+# size is the no. of neurons in the hidden layer
+# decay is the amount of regularization
+hyperparam_grid <- expand.grid(
+  size = 1:num_predictors,
+  decay = seq(0, 0.5, length = 10)
+)
+
+neural_model <- train(edible ~ .,
+           method     = "nnet",
+           tuneGrid   = hyperparam_grid,
+           trControl  = train_control,
+           metric     = "F1",
+           linout     = FALSE,   #classification
+           trace      = FALSE,
+           data       = train_set)
+
+neural_pred_prob = predict(neural_model, newdata = x_test, type="prob")[,"poisonous"]
+  
+neural_f_scores = threshold_f_scores(neural_pred_prob)
+neural_best_f_score = max(neural_f_scores$f_score, na.rm=T)
+```
+
+```{r fig.width=3, fig.height=2}
+best_size = neural_model$finalModel$tuneValue$size
+best_decay = neural_model$finalModel$tuneValue$decay
+
+cat("The best model has size =", round(best_size, 2), "and decay=", round(best_decay, 2))
+# Validation heatmap
+neural_grid = neural_model$results
+ggplot(neural_grid, aes(size, decay, fill= F1)) + 
+  geom_tile() 
+```
+
+# 4 Model Performance
+
+**F-Score**
+
+```{r fig.height=3}
+# Store all model F-scores in a vector
+f_scores = c(
+  logistic = logistic_best_f_score,
+  random_forest = random_f_best_f_score,
+  boost = boost_best_f_score,
+  knn = knn_best_f_score,
+  neural = neural_best_f_score
+)
+
+sorted_f_scores = sort(f_scores, decreasing=TRUE)
+model_order = names(sorted_f_scores)
+
+# Combine model names and F-scores into dataframe to use with ggplot
+f_scores_df = data.frame(
+  model = names(sorted_f_scores),
+  f_score = unname(sorted_f_scores)
+)
+
+ggplot(f_scores_df, aes(x=model, y=f_score)) + 
+  geom_bar(stat = "identity") +
+  coord_cartesian(ylim=c(0.85, 1)) + 
+  scale_x_discrete(limits = model_order) + 
+  geom_text(aes(label=round(f_score, 3)), vjust=2, col="white") + 
+  ylab("Test set F-score")
+```
+
+**AUC**
+
+```{r}
+suppressMessages(library(pROC))
+
+# Function to calculate test set AUC of model
+get_AUC = function(pred_prob) {
+  roc_obj <- roc(response=y_test, predictor=pred_prob,
+                 levels=c("edible", "poisonous"), 
+                 direction=c("<"))
+  return(auc(roc_obj))
+}
+
+# Store all predicted test set probabilities in a vector
+pred_probs = data.frame(
+  logistic = logistic_pred_prob,
+  random_forest = random_f_pred_prob,
+  boost = boost_pred_prob,
+  knn = knn_pred_prob,
+  neural = neural_pred_prob
+)
+
+aucs = apply(pred_probs, 2, get_AUC)
+sorted_aucs = sort(aucs, decreasing=TRUE)
+model_order = names(sorted_aucs)
+
+# Combine model names and AUCs into dataframe to use with ggplot
+aucs_df = data.frame(
+  model = names(sorted_aucs),
+  auc = unname(sorted_aucs)
+)
+
+ggplot(aucs_df, aes(x=model, y=auc)) + 
+  geom_bar(stat = "identity") +
+  coord_cartesian(ylim=c(0.85, 1)) + 
+  scale_x_discrete(limits = model_order) + 
+  geom_text(aes(label=round(auc, 3)), vjust=2, col="white") + 
+  ylab("Test set AUC")
+```
+
+**ROC**
+
+```{r fig.height=4}
+suppressMessages(library(pROC))
+roc_obj <- roc(response=y_test, predictor=logistic_pred_prob,
+                 levels=c("edible", "poisonous"), 
+                 direction=c("<"))
+
+# Get the coordinates of the best threshold (which maximizes the F-score)
+logistic_best_threshold = logistic_f_scores$threshold[which.max(logistic_f_scores$f_score)]
+best_coords = coords(roc_obj, logistic_best_threshold, input="threshold")
+best_tpr = best_coords$sensitivity
+best_fpr = 1 - best_coords$specificity
+
+# Plot ROC curve
+plot(roc_obj,legacy.axes=TRUE,print.auc=TRUE,
+print.thres.cex=1.0,print.auc.cex=1.0,cex.lab=1.0,
+xlab="False Positive Rate",
+ylab="True Positive Rate")
+# roc.plot() reverses x-axis
+points(1 - best_fpr, best_tpr, col="red", pch=19)
+label = paste("(", round(1 - best_fpr, 2), ",", round(best_tpr, 2), ")")
+text(1 - best_fpr + 0.2, best_tpr, label)
+title(paste("The best threshold is", round(logistic_best_threshold, 2)),
+      line=3)
+```
+
+# 5 Model Interpretation
+
+**Logistic regression Predictor Importances\
+**Interpret the odds.
+
+```{r fig.height=3}
+# Fit a logistic regression model using the best hyperpameter values
+suppressMessages(library(glmnet))
+best_alpha = logistic_model$finalModel$tuneValue$alpha
+best_lambda = logistic_model$finalModel$tuneValue$lambda
+
+X = model.matrix(edible ~ ., train_set)[,-1]
+y = y_train
+
+best_log_model = glmnet(X, y, alpha = best_alpha, 
+                        lambda = best_lambda, 
+                        standardize = TRUE, 
+                        family="binomial")
+
+# Calculate exponents of all coefficients
+odds = (exp(coef(best_log_model)))
+sorted_odds = odds[order(odds, decreasing = FALSE), ]
+# Remove the intercept coefficient
+sorted_odds = sorted_odds[names(sorted_odds) != "(Intercept)"]
+predictor_order = names(sorted_odds)
+
+sorted_odds_df = data.frame(
+  predictor = names(sorted_odds),
+  odds = unname(sorted_odds)
+)
+
+largest_odds = tail(sorted_odds_df, 3)
+p1 = ggplot(largest_odds, aes(x=odds, y=predictor)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label=round(odds, 2)), hjust=-0.5) +
+  scale_y_discrete(limits = largest_odds$predictor) +
+  xlim(0, 5.0) + 
+  xlab("exp(coefficient)")
+
+smallest_odds = sorted_odds_df[1:3,]
+p2 = ggplot(smallest_odds, aes(x=odds, y=predictor)) +
+  geom_col(width = 0.6) + 
+  geom_text(aes(label=round(odds, 2)), hjust=-0.5) +
+  xlim(0, 5.0) + 
+  xlab("exp(coefficient)")
+
+grid.arrange(p1, p2, ncol=1)
+```
+
+**Random Forest Predictor Importances**
+
+```{r fig.height=3}
+importance_random_f = as.data.frame(importance(random_f_model))
+
+importance_random_f = data.frame(
+  predictor = rownames(importance_random_f),
+  importance = importance_random_f$MeanDecreaseGini
+)
+
+sorted_importances = importance_random_f[order(importance_random_f$importance,
+                                                decreasing = FALSE), ]
+largest_importances = tail(sorted_importances, 5)
+
+ggplot(largest_importances, aes(x=importance, y=predictor)) +
+  geom_col(width = 0.6) +
+  xlab("Mean Decrease in Gini") + 
+  geom_text(aes(label=round(importance, 2)), hjust=-0.5) + 
+  scale_y_discrete(limits = largest_importances$predictor) + 
+  xlim(0, 110.0) + 
+  ylab("Predictor")
+```
+
+**Partial dependence probabilities**
+
+```{r fig.height=3}
+suppressMessages(library(pdp))
+
+gill_bruises = partial(random_f_model, pred.var = c("gill_size", "bruises"), 
+                       train = train_set, prob=TRUE, which.class="poisonous")
+xtabs(yhat ~ gill_size + bruises, gill_bruises)
+```
